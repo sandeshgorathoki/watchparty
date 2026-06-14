@@ -21,7 +21,7 @@ function getRoomFromUrl() {
   return params.get('room') || ''
 }
 
-const SIGNALING_SERVER = window.location.origin.replace(/^http/, 'ws').replace(/:\d+$/, ':3001')
+const SIGNALING_SERVER = (import.meta.env.VITE_SIGNALING_SERVER || 'http://localhost:3001')
 const ICE_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -44,6 +44,8 @@ export default function App() {
   const [videoUrl, setVideoUrl] = useState('')
   const [currentVideoId, setCurrentVideoId] = useState('')
   const [roomReady, setRoomReady] = useState(false)
+  const [messages, setMessages] = useState([])
+  const [chatInput, setChatInput] = useState('')
 
   const localVideoRef = useRef(null)
   const remoteVideoRef = useRef(null)
@@ -164,6 +166,7 @@ export default function App() {
     })
     socket.on('signal', handleSignal)
     socket.on('watch-state', (payload) => handleWatchStateFromSocket(payload))
+    socket.on('chat', (payload) => handleChatMessage(payload))
   }
 
   async function joinRoom() {
@@ -196,6 +199,7 @@ export default function App() {
     })
     socket.on('signal', handleSignal)
     socket.on('watch-state', (payload) => handleWatchStateFromSocket(payload))
+    socket.on('chat', (payload) => handleChatMessage(payload))
   }
 
   // WebRTC + Socket.IO signaling functions
@@ -276,7 +280,7 @@ export default function App() {
   }
 
   async function copyRoomLink() {
-    if (!roomId || !roomReady) return
+    if (!roomId) return
     const link = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomId)}`
     try {
       await navigator.clipboard.writeText(link)
@@ -354,7 +358,30 @@ export default function App() {
   }
 
   function sendMessage(message) {
-    if (connRef.current?.open) connRef.current.send(message)
+    if (socketRef.current?.connected) {
+      if (message?.type === 'watch-state') socketRef.current.emit('watch-state', message)
+      else socketRef.current.emit('signal', message)
+    }
+  }
+
+  function handleChatMessage(payload) {
+    if (!payload) return
+    setMessages((m) => [{ ...payload, time: payload.time || Date.now() }, ...m].slice(0, 50))
+    addLog(`${payload.from || 'Friend'}: ${payload.text}`)
+  }
+
+  function sendChat() {
+    const text = (chatInput || '').trim()
+    if (!text) return
+    const msg = { text, from: 'You', time: Date.now() }
+    setMessages((m) => [msg, ...m].slice(0, 50))
+    try {
+      socketRef.current?.emit('chat', msg)
+      addLog('Sent chat')
+    } catch (e) {
+      addLog('Chat send failed')
+    }
+    setChatInput('')
   }
 
   function sendCurrentWatchState() {
@@ -592,8 +619,21 @@ export default function App() {
             <h2>Connection log</h2>
           </div>
         </div>
-        <div className="logList">
-          {logs.length ? logs.map((item) => <p key={item}>{item}</p>) : <p>Create a room, copy the link, and send it to your friend.</p>}
+        <div style={{display:'flex',gap:12}}>
+          <div style={{flex:1}}>
+            <div className="logList" style={{maxHeight:200,overflow:'auto'}}>
+              {messages.length ? messages.map((m) => <p key={m.time}>{`${m.from||'Friend'}: ${m.text}`}</p>) : <p>No messages yet</p>}
+            </div>
+            <div style={{display:'flex',gap:8,marginTop:8}}>
+              <input value={chatInput} onChange={(e)=>setChatInput(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') sendChat() }} placeholder="Type a message" />
+              <button className="btn" onClick={sendChat}>Send</button>
+            </div>
+          </div>
+          <div style={{width:260}}>
+            <div className="logList" style={{maxHeight:200,overflow:'auto'}}>
+              {logs.length ? logs.map((item) => <p key={item}>{item}</p>) : <p>Create a room, copy the link, and send it to your friend.</p>}
+            </div>
+          </div>
         </div>
       </section>
     </main>

@@ -31,6 +31,12 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('watch-state', payload)
   })
 
+  socket.on('chat', (payload) => {
+    const roomId = socket.data.room
+    if (!roomId) return
+    socket.to(roomId).emit('chat', payload)
+  })
+
   socket.on('disconnect', () => {
     const roomId = socket.data.room
     if (roomId) socket.to(roomId).emit('peer-left')
