@@ -21,6 +21,25 @@ function getRoomFromUrl() {
   return params.get('room') || ''
 }
 
+const PEER_OPTIONS = {
+  host: '0.peerjs.com',
+  port: 443,
+  path: '/',
+  secure: true,
+  debug: 2,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' }
+    ]
+  }
+}
+
+function createPeer(id) {
+  return id ? new Peer(id, PEER_OPTIONS) : new Peer(PEER_OPTIONS)
+}
+
 export default function App() {
   const [localStream, setLocalStream] = useState(null)
   const [remoteStream, setRemoteStream] = useState(null)
@@ -123,8 +142,9 @@ export default function App() {
     })
 
     peer.on('error', (error) => {
-      setStatus(error.type === 'unavailable-id' ? 'Room name already exists' : 'Connection error')
-      addLog(error.message || 'Peer connection error')
+      const label = formatPeerError(error)
+      setStatus(label)
+      addLog(error.message ? `${label}: ${error.message}` : label)
       console.warn(error)
     })
   }
@@ -142,6 +162,11 @@ export default function App() {
       addLog('Friend left')
       setRemoteStream(null)
     })
+    conn.on('error', (error) => {
+      setStatus('Watch sync failed')
+      addLog(error.message || 'Watch sync connection failed')
+      console.warn(error)
+    })
   }
 
   function bindMediaCall(call) {
@@ -154,6 +179,30 @@ export default function App() {
       setRemoteStream(null)
       addLog('Video call ended')
     })
+    call.on('error', (error) => {
+      setStatus('Video call failed')
+      addLog(error.message || 'Video call connection failed')
+      console.warn(error)
+    })
+  }
+
+  function formatPeerError(error) {
+    const messages = {
+      'browser-incompatible': 'Browser not compatible',
+      'disconnected': 'Peer server disconnected',
+      'invalid-id': 'Invalid room code',
+      'invalid-key': 'Peer server key failed',
+      'network': 'Network connection error',
+      'peer-unavailable': 'Room not found',
+      'ssl-unavailable': 'Secure connection unavailable',
+      'server-error': 'Peer server error',
+      'socket-error': 'Peer server socket error',
+      'socket-closed': 'Peer server socket closed',
+      'unavailable-id': 'Room name already exists',
+      'webrtc': 'WebRTC connection failed'
+    }
+
+    return messages[error?.type] || 'Connection error'
   }
 
   async function createRoom() {
@@ -164,7 +213,7 @@ export default function App() {
     updateUrl(id)
 
     peerRef.current?.destroy()
-    const peer = new Peer(id)
+    const peer = createPeer(id)
     peerRef.current = peer
     attachPeerEvents(peer, 'host')
   }
@@ -178,7 +227,7 @@ export default function App() {
     updateUrl(id)
 
     peerRef.current?.destroy()
-    const peer = new Peer()
+    const peer = createPeer()
     peerRef.current = peer
     attachPeerEvents(peer, 'guest')
 
