@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import Peer from 'peerjs'
+import { io } from 'socket.io-client'
 
 function extractYouTubeId(url) {
   if (!url) return null
@@ -21,23 +21,13 @@ function getRoomFromUrl() {
   return params.get('room') || ''
 }
 
-const PEER_OPTIONS = {
-  host: '0.peerjs.com',
-  port: 443,
-  path: '/',
-  secure: true,
-  debug: 2,
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' }
-    ]
-  }
-}
-
-function createPeer(id) {
-  return id ? new Peer(id, PEER_OPTIONS) : new Peer(PEER_OPTIONS)
+const SIGNALING_SERVER = window.location.origin.replace(/^http/, 'ws').replace(/:\d+$/, ':3001')
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+  ]
 }
 
 export default function App() {
@@ -59,12 +49,13 @@ export default function App() {
   const remoteVideoRef = useRef(null)
   const ytDivRef = useRef(null)
   const ytPlayerRef = useRef(null)
-  const peerRef = useRef(null)
-  const connRef = useRef(null)
-  const callRef = useRef(null)
+  const socketRef = useRef(null)
+  const pcRef = useRef(null)
   const localStreamRef = useRef(null)
   const suppressSyncRef = useRef(false)
   const lastStateRef = useRef({ videoId: '', status: 'idle', seconds: 0 })
+  const joinRetryRef = useRef(0)
+  const joinTargetRef = useRef('')
 
   useEffect(() => {
     getLocalMedia()
@@ -78,6 +69,13 @@ export default function App() {
       localStreamRef.current?.getTracks().forEach((track) => track.stop())
     }
   }, [])
+
+  useEffect(() => {
+    if (joinId && localStream && !role && !peerRef.current) {
+      setStatus('Room link loaded')
+      addLog('Click Join Room to connect')
+    }
+  }, [joinId, localStream, role])
 
   useEffect(() => {
     localStreamRef.current = localStream
@@ -125,96 +123,23 @@ export default function App() {
   }
 
   function attachPeerEvents(peer, nextRole) {
-    peer.on('open', (id) => {
-      setStatus(nextRole === 'host' ? 'Room is live' : 'Joining room')
-      if (nextRole === 'host') {
-        setRoomId(id)
-        setJoinId(id)
-        setRoomReady(true)
-        updateUrl(id)
-      }
-      addLog(nextRole === 'host' ? `Room created: ${id}` : `Your peer opened: ${id}`)
-    })
-
-    peer.on('connection', (conn) => {
-      bindDataConnection(conn)
-      addLog('Friend joined the room')
-    })
-
-    peer.on('call', (call) => {
-      callRef.current = call
-      call.answer(localStreamRef.current)
-      bindMediaCall(call)
-      addLog('Answered video call')
-    })
-
-    peer.on('error', (error) => {
-      const label = formatPeerError(error)
-      setStatus(label)
-      if (nextRole === 'host') setRoomReady(false)
-      addLog(error.message ? `${label}: ${error.message}` : label)
-      console.warn(error)
-    })
+    // PeerJS replaced with Socket.IO + WebRTC signaling; no-op
   }
 
   function bindDataConnection(conn) {
-    connRef.current = conn
-    conn.on('open', () => {
-      setStatus('Connected with friend')
-      addLog('Watch sync connected')
-      sendCurrentWatchState()
-    })
-    conn.on('data', handlePeerMessage)
-    conn.on('close', () => {
-      setStatus('Friend disconnected')
-      addLog('Friend left')
-      setRemoteStream(null)
-    })
-    conn.on('error', (error) => {
-      setStatus('Watch sync failed')
-      addLog(error.message || 'Watch sync connection failed')
-      console.warn(error)
-    })
+    // Data channel handled via Socket.IO messages; we use socketRef for messaging
   }
 
   function bindMediaCall(call) {
-    call.on('stream', (stream) => {
-      setRemoteStream(stream)
-      setStatus('Video call connected')
-      addLog('Video call connected')
-    })
-    call.on('close', () => {
-      setRemoteStream(null)
-      addLog('Video call ended')
-    })
-    call.on('error', (error) => {
-      setStatus('Video call failed')
-      addLog(error.message || 'Video call connection failed')
-      console.warn(error)
-    })
+    // Media call handled via RTCPeerConnection events in new implementation
   }
 
   function formatPeerError(error) {
-    const messages = {
-      'browser-incompatible': 'Browser not compatible',
-      'disconnected': 'Peer server disconnected',
-      'invalid-id': 'Invalid room code',
-      'invalid-key': 'Peer server key failed',
-      'network': 'Network connection error',
-      'peer-unavailable': 'Room not found',
-      'ssl-unavailable': 'Secure connection unavailable',
-      'server-error': 'Peer server error',
-      'socket-error': 'Peer server socket error',
-      'socket-closed': 'Peer server socket closed',
-      'unavailable-id': 'Room name already exists',
-      'webrtc': 'WebRTC connection failed'
-    }
-
-    return messages[error?.type] || 'Connection error'
+    return error?.message || 'Connection error'
   }
 
   async function createRoom() {
-    const id = roomId || makeRoomId()
+    const id = makeRoomId()
     setRoomId(id)
     setJoinId(id)
     setRole('host')
@@ -222,38 +147,127 @@ export default function App() {
     setStatus('Creating room')
     updateUrl(id)
 
-    peerRef.current?.destroy()
-    const peer = createPeer(id)
-    peerRef.current = peer
-    attachPeerEvents(peer, 'host')
+    // connect to signaling server and join
+    socketRef.current?.disconnect()
+    const socket = io('http://localhost:3001')
+    socketRef.current = socket
+    socket.on('connect', () => {
+      socket.emit('join-room', id)
+      setRoomReady(true)
+      setStatus('Room is live')
+      addLog(`Room created: ${id}`)
+    })
+    socket.on('peer-joined', () => {
+      addLog('Friend joined the room')
+      // create offer
+      startHostOffer()
+    })
+    socket.on('signal', handleSignal)
+    socket.on('watch-state', (payload) => handleWatchStateFromSocket(payload))
   }
 
   async function joinRoom() {
     const id = joinId.trim()
     if (!id) return
+    if (!localStreamRef.current) {
+      setStatus('Camera and mic needed')
+      addLog('Allow camera and mic before joining')
+      await getLocalMedia()
+      return
+    }
 
     setRoomId(id)
     setRole('guest')
     setRoomReady(false)
     setStatus('Looking for room')
     updateUrl(id)
+    joinRetryRef.current = 0
+    joinTargetRef.current = id
 
-    peerRef.current?.destroy()
-    const peer = createPeer()
-    peerRef.current = peer
-    attachPeerEvents(peer, 'guest')
-
-    peer.on('open', () => {
-      const conn = peer.connect(id, { reliable: true })
-      bindDataConnection(conn)
-
-      if (localStreamRef.current) {
-        const call = peer.call(id, localStreamRef.current)
-        callRef.current = call
-        bindMediaCall(call)
-        addLog('Calling room host')
-      }
+    // connect to signaling server and join
+    socketRef.current?.disconnect()
+    const socket = io('http://localhost:3001')
+    socketRef.current = socket
+    socket.on('connect', () => {
+      socket.emit('join-room', id)
+      setRoomReady(true)
+      setStatus('Joined room')
+      addLog(`Joined room: ${id}`)
     })
+    socket.on('signal', handleSignal)
+    socket.on('watch-state', (payload) => handleWatchStateFromSocket(payload))
+  }
+
+  // WebRTC + Socket.IO signaling functions
+  function createPeerConnection() {
+    if (pcRef.current) return pcRef.current
+    const pc = new RTCPeerConnection(ICE_CONFIG)
+    pcRef.current = pc
+
+    // add local tracks
+    localStreamRef.current?.getTracks().forEach((t) => pc.addTrack(t, localStreamRef.current))
+
+    pc.ontrack = (evt) => {
+      const [stream] = evt.streams
+      setRemoteStream(stream)
+      setStatus('Video call connected')
+      addLog('Video call connected')
+    }
+
+    pc.onicecandidate = (evt) => {
+      if (evt.candidate && socketRef.current) {
+        socketRef.current.emit('signal', { type: 'candidate', candidate: evt.candidate })
+      }
+    }
+
+    pc.onconnectionstatechange = () => {
+      if (!pc) return
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        setRemoteStream(null)
+        addLog('Video call ended')
+      }
+    }
+
+    return pc
+  }
+
+  async function startHostOffer() {
+    try {
+      const pc = createPeerConnection()
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+      socketRef.current.emit('signal', { type: 'offer', sdp: pc.localDescription })
+      addLog('Sent offer to guest')
+    } catch (e) {
+      console.warn(e)
+      addLog('Failed to create offer')
+    }
+  }
+
+  async function handleSignal(message) {
+    if (!message) return
+    const pc = createPeerConnection()
+    try {
+      if (message.type === 'offer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(message.sdp))
+        const answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        socketRef.current.emit('signal', { type: 'answer', sdp: pc.localDescription })
+        addLog('Answered offer')
+      } else if (message.type === 'answer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(message.sdp))
+        addLog('Received answer')
+      } else if (message.type === 'candidate') {
+        if (message.candidate) await pc.addIceCandidate(new RTCIceCandidate(message.candidate))
+      }
+    } catch (e) {
+      console.warn('Signal handling error', e)
+    }
+  }
+
+  function handleWatchStateFromSocket(payload) {
+    // reuse existing watch-state handling path
+    handlePeerMessage(payload)
   }
 
   function updateUrl(id) {
