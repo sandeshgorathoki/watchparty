@@ -53,6 +53,7 @@ export default function App() {
   const [logs, setLogs] = useState([])
   const [videoUrl, setVideoUrl] = useState('')
   const [currentVideoId, setCurrentVideoId] = useState('')
+  const [roomReady, setRoomReady] = useState(false)
 
   const localVideoRef = useRef(null)
   const remoteVideoRef = useRef(null)
@@ -126,6 +127,12 @@ export default function App() {
   function attachPeerEvents(peer, nextRole) {
     peer.on('open', (id) => {
       setStatus(nextRole === 'host' ? 'Room is live' : 'Joining room')
+      if (nextRole === 'host') {
+        setRoomId(id)
+        setJoinId(id)
+        setRoomReady(true)
+        updateUrl(id)
+      }
       addLog(nextRole === 'host' ? `Room created: ${id}` : `Your peer opened: ${id}`)
     })
 
@@ -144,6 +151,7 @@ export default function App() {
     peer.on('error', (error) => {
       const label = formatPeerError(error)
       setStatus(label)
+      if (nextRole === 'host') setRoomReady(false)
       addLog(error.message ? `${label}: ${error.message}` : label)
       console.warn(error)
     })
@@ -210,6 +218,8 @@ export default function App() {
     setRoomId(id)
     setJoinId(id)
     setRole('host')
+    setRoomReady(false)
+    setStatus('Creating room')
     updateUrl(id)
 
     peerRef.current?.destroy()
@@ -224,6 +234,8 @@ export default function App() {
 
     setRoomId(id)
     setRole('guest')
+    setRoomReady(false)
+    setStatus('Looking for room')
     updateUrl(id)
 
     peerRef.current?.destroy()
@@ -250,7 +262,7 @@ export default function App() {
   }
 
   async function copyRoomLink() {
-    if (!roomId) return
+    if (!roomId || !roomReady) return
     const link = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomId)}`
     try {
       await navigator.clipboard.writeText(link)
@@ -456,37 +468,66 @@ export default function App() {
 
   return (
     <main className="app">
-      <section className="topbar">
-        <div>
+      <section className="hero">
+        <div className="heroCopy">
           <p className="eyebrow">WatchParty</p>
-          <h1>Room, call, and synced video</h1>
+          <h1>Watch together, face to face</h1>
+          <p className="subtitle">Create a live room, invite a friend, and keep the video controls in sync.</p>
         </div>
-        <span className={`status ${remoteStream ? 'connected' : ''}`}>{status}</span>
+        <div className={`statusCard ${remoteStream ? 'connected' : ''}`}>
+          <span>Current status</span>
+          <strong>{status}</strong>
+        </div>
       </section>
 
-      <section className="roomStrip">
+      <section className="panel roomStrip">
+        <div className="sectionTitle">
+          <div>
+            <p className="kicker">Room</p>
+            <h2>Create or join</h2>
+          </div>
+          {role && <span className="roleBadge">{role === 'host' ? 'Hosting' : 'Joining'}</span>}
+        </div>
         <div className="roomControls">
           <input value={joinId} onChange={(event) => setJoinId(event.target.value)} placeholder="Room code" />
           <button className="btn primary" onClick={createRoom}>Create Room</button>
           <button className="btn secondary" onClick={joinRoom}>Join Room</button>
-          <button className="btn ghost" onClick={copyRoomLink} disabled={!roomId}>Copy Link</button>
+          <button className="btn ghost" onClick={copyRoomLink} disabled={!roomReady}>Copy Link</button>
         </div>
-        {roomLink && <p className="roomLink">{roomLink}</p>}
+        {roomLink && (
+          <p className="roomLink">
+            {roomReady ? roomLink : role === 'host' ? 'Creating room. Copy will unlock when the room is live.' : roomLink}
+          </p>
+        )}
+        {joinId && !role && <p className="roomHint">Room code loaded. Allow camera and mic, then click Join Room.</p>}
       </section>
 
-      <section className="stage">
+      <section className="panel stage">
         <div className="people">
           <div className="videoTile">
             <video ref={localVideoRef} autoPlay muted playsInline />
-            <span>You</span>
+            <span className="tileLabel">You</span>
           </div>
           <div className="videoTile">
-            {remoteStream ? <video ref={remoteVideoRef} autoPlay playsInline /> : <div className="emptyRemote">Waiting for friend</div>}
-            <span>{role === 'host' ? 'Friend' : 'Host'}</span>
+            {remoteStream ? (
+              <video ref={remoteVideoRef} autoPlay playsInline />
+            ) : (
+              <div className="emptyRemote">
+                <strong>Waiting for friend</strong>
+                <span>Share the live room link after creating a room.</span>
+              </div>
+            )}
+            <span className="tileLabel">{role === 'host' ? 'Friend' : 'Host'}</span>
           </div>
         </div>
 
         <div className="devicePanel">
+          <div className="sectionTitle compact">
+            <div>
+              <p className="kicker">Call</p>
+              <h2>Devices</h2>
+            </div>
+          </div>
           <div className="callButtons">
             <button className="btn secondary" onClick={toggleMic}>{micOn ? 'Mic On' : 'Mic Off'}</button>
             <button className="btn secondary" onClick={toggleCam}>{camOn ? 'Cam On' : 'Cam Off'}</button>
@@ -506,7 +547,14 @@ export default function App() {
         </div>
       </section>
 
-      <section className="watch">
+      <section className="panel watch">
+        <div className="sectionTitle">
+          <div>
+            <p className="kicker">Watch</p>
+            <h2>Shared player</h2>
+          </div>
+          {currentVideoId && <span className="roleBadge">Synced</span>}
+        </div>
         <div className="watchControls">
           <input
             value={videoUrl}
@@ -523,8 +571,16 @@ export default function App() {
         </div>
       </section>
 
-      <section className="activity">
-        {logs.length ? logs.map((item) => <p key={item}>{item}</p>) : <p>Create a room, copy the link, and send it to your friend.</p>}
+      <section className="panel activity">
+        <div className="sectionTitle compact">
+          <div>
+            <p className="kicker">Activity</p>
+            <h2>Connection log</h2>
+          </div>
+        </div>
+        <div className="logList">
+          {logs.length ? logs.map((item) => <p key={item}>{item}</p>) : <p>Create a room, copy the link, and send it to your friend.</p>}
+        </div>
       </section>
     </main>
   )
